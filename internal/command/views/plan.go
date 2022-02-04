@@ -10,10 +10,12 @@ import (
 	"github.com/hashicorp/terraform/internal/command/arguments"
 	"github.com/hashicorp/terraform/internal/command/format"
 	"github.com/hashicorp/terraform/internal/configs/configschema"
+	"github.com/hashicorp/terraform/internal/lang/globalref"
 	"github.com/hashicorp/terraform/internal/plans"
 	"github.com/hashicorp/terraform/internal/plans/objchange"
 	"github.com/hashicorp/terraform/internal/terraform"
 	"github.com/hashicorp/terraform/internal/tfdiags"
+	"github.com/zclconf/go-cty/cty"
 )
 
 // The Plan view is used for the plan command.
@@ -340,16 +342,36 @@ func renderChangesDetectedByRefresh(plan *plans.Plan, schemas *terraform.Schemas
 		relevant[r.Resource.String()] = true
 	}
 
+	var changes []*plans.ResourceInstanceChange
+	for _, rcs := range plan.DriftedResources {
+		providerSchema := schemas.ProviderSchema(rcs.ProviderAddr.Provider)
+		if providerSchema == nil {
+			// Should never happen
+			view.streams.Printf("(schema missing for %s)\n\n", rcs.ProviderAddr)
+			continue
+		}
+		rSchema, _ := providerSchema.SchemaForResourceAddr(rcs.Addr.Resource.Resource)
+		if rSchema == nil {
+			// Should never happen
+			view.streams.Printf("(schema missing for %s)\n\n", rcs.Addr)
+			continue
+		}
+
+		changes = append(changes, decodeChange(rcs, rSchema))
+	}
+
 	// In refresh-only mode, we show all resources marked as drifted,
 	// including those which have moved without other changes. In other plan
 	// modes, move-only changes will be rendered in the planned changes, so
 	// we skip them here.
-	var drs []*plans.ResourceInstanceChangeSrc
+	var drs []*plans.ResourceInstanceChange
 	if plan.UIMode == plans.RefreshOnlyMode {
-		drs = plan.DriftedResources
+		drs = changes
 	} else {
-		for _, dr := range plan.DriftedResources {
-			if dr.Action != plans.NoOp && relevant[dr.Addr.ContainingResource().String()] {
+		for _, dr := range changes {
+			change := filterRefreshChange(dr, plan.RelevantAttributes)
+			if change.Action != plans.NoOp {
+				dr.Change = change
 				drs = append(drs, dr)
 			}
 		}
@@ -403,7 +425,7 @@ func renderChangesDetectedByRefresh(plan *plans.Plan, schemas *terraform.Schemas
 		}
 
 		view.streams.Println(format.ResourceChange(
-			decodeChange(rcs, rSchema),
+			rcs,
 			rSchema,
 			view.colorize,
 			format.DiffLanguageDetectedDrift,
@@ -424,6 +446,65 @@ func renderChangesDetectedByRefresh(plan *plans.Plan, schemas *terraform.Schemas
 	}
 
 	return true
+}
+
+// Filter individual resource changes for display based on the attributes which
+// may have contributed to the plan as a whole. If the resulting change will be
+// a NoOp if it has nothing relevant to the plan.
+func filterRefreshChange(change *plans.ResourceInstanceChange, contributing []globalref.ResourceAttr) plans.Change {
+
+	fmt.Println("filtering", change.Addr)
+	if change.Action == plans.NoOp {
+		return change.Change
+	}
+
+	var relevantAttrs []cty.Path
+	resAddr := change.Addr.ContainingResource()
+
+	for _, attr := range contributing {
+		fmt.Printf("  contrib: %s %#v\n", attr.Resource, attr.Attr)
+		if resAddr.Equal(attr.Resource) {
+			fmt.Printf("      rel: %s %#v\n", attr.Resource, attr.Attr)
+			relevantAttrs = append(relevantAttrs, attr.Attr)
+		}
+	}
+
+	// if no attributes are relevant, then we can just use the Before value
+	if len(relevantAttrs) == 0 {
+		fmt.Println("NO RELEVANT", resAddr)
+		return plans.Change{
+			Action: plans.NoOp,
+			Before: change.Before,
+			After:  change.Before,
+		}
+	}
+
+	// We have some attributes in this change which may have contributed to
+	// other changes in the plan, so we are going to take the Before value and
+	// add in only those attributes which may have contributed from the After
+	// value.
+	before := change.Before
+	after, _ := cty.Transform(before, func(path cty.Path, v cty.Value) (cty.Value, error) {
+		for i, attrPath := range relevantAttrs {
+			if attrPath.Equals(path) {
+				// remove the path from further consideration
+				relevantAttrs = append(relevantAttrs[:i], relevantAttrs[i+1:]...)
+				return path.Apply(change.After)
+			}
+		}
+		return v, nil
+	})
+
+	action := change.Action
+	if before.RawEquals(after) {
+		action = plans.NoOp
+	}
+
+	return plans.Change{
+		Action: action,
+		Before: before,
+		After:  after,
+	}
 }
 
 func decodeChange(change *plans.ResourceInstanceChangeSrc, schema *configschema.Block) *plans.ResourceInstanceChange {
