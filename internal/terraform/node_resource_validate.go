@@ -2,6 +2,7 @@ package terraform
 
 import (
 	"fmt"
+	"log"
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/terraform/internal/addrs"
@@ -39,6 +40,18 @@ func (n *NodeValidatableResource) Path() addrs.ModuleInstance {
 // GraphNodeEvalable
 func (n *NodeValidatableResource) Execute(ctx EvalContext, op walkOperation) (diags tfdiags.Diagnostics) {
 	diags = diags.Append(n.validateResource(ctx))
+
+	var self addrs.Referenceable
+	switch {
+	case n.Config.Count != nil:
+		self = n.Addr.Resource.Instance(addrs.IntKey(0))
+	case n.Config.ForEach != nil:
+		self = n.Addr.Resource.Instance(addrs.StringKey(""))
+	default:
+		self = n.Addr.Resource.Instance(addrs.NoKey)
+	}
+	diags = diags.Append(validateCheckRules(ctx, n.Config.Preconditions, nil))
+	diags = diags.Append(validateCheckRules(ctx, n.Config.Postconditions, self))
 
 	if managed := n.Config.Managed; managed != nil {
 		hasCount := n.Config.Count != nil
@@ -440,6 +453,25 @@ func (n *NodeValidatableResource) validateResource(ctx EvalContext) tfdiags.Diag
 
 		resp := provider.ValidateDataResourceConfig(req)
 		diags = diags.Append(resp.Diagnostics.InConfigBody(n.Config.Config, n.Addr.String()))
+	}
+
+	return diags
+}
+
+func validateCheckRules(ctx EvalContext, crs []*configs.CheckRule, self addrs.Referenceable) tfdiags.Diagnostics {
+	var diags tfdiags.Diagnostics
+	log.Printf("[TRACE] validateCheckRules: self: %v", self)
+
+	for _, cr := range crs {
+		condition, conditionDiags := ctx.EvaluateExpr(cr.Condition, cty.Bool, self)
+		diags = diags.Append(conditionDiags)
+		log.Printf("[TRACE] validateCheckRules: condition diags: %s", conditionDiags.Err())
+		log.Printf("[TRACE] validateCheckRules: condition: %v", condition.GoString())
+
+		errorMessage, errorMessageDiags := ctx.EvaluateExpr(cr.ErrorMessage, cty.String, self)
+		log.Printf("[TRACE] validateCheckRules: error diags: %s", errorMessageDiags.Err())
+		diags = diags.Append(errorMessageDiags)
+		log.Printf("[TRACE] validateCheckRules: error message: %v", errorMessage.GoString())
 	}
 
 	return diags
