@@ -3,11 +3,13 @@ package views
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/command/arguments"
+	"github.com/hashicorp/terraform/internal/lang/globalref"
 	"github.com/hashicorp/terraform/internal/plans"
 	"github.com/hashicorp/terraform/internal/states"
 	"github.com/hashicorp/terraform/internal/states/statefile"
@@ -107,7 +109,7 @@ func TestOperation_planNoChanges(t *testing.T) {
 			},
 			"No objects need to be destroyed.",
 		},
-		"drift detected in normal mode": {
+		"no drift detected in normal noop": {
 			func(schemas *terraform.Schemas) *plans.Plan {
 				addr := addrs.Resource{
 					Mode: addrs.ManagedResourceMode,
@@ -146,7 +148,54 @@ func TestOperation_planNoChanges(t *testing.T) {
 					DriftedResources: drs,
 				}
 			},
-			"to update the Terraform state to match, create and apply a refresh-only plan",
+			"No changes",
+		},
+		"drift detected in normal mode": {
+			func(schemas *terraform.Schemas) *plans.Plan {
+				addr := addrs.Resource{
+					Mode: addrs.ManagedResourceMode,
+					Type: "test_resource",
+					Name: "somewhere",
+				}.Instance(addrs.NoKey).Absolute(addrs.RootModuleInstance)
+				schema, _ := schemas.ResourceTypeConfig(
+					addrs.NewDefaultProvider("test"),
+					addr.Resource.Resource.Mode,
+					addr.Resource.Resource.Type,
+				)
+				ty := schema.ImpliedType()
+				rc := &plans.ResourceInstanceChange{
+					Addr:        addr,
+					PrevRunAddr: addr,
+					ProviderAddr: addrs.RootModuleInstance.ProviderConfigDefault(
+						addrs.NewDefaultProvider("test"),
+					),
+					Change: plans.Change{
+						Action: plans.Update,
+						Before: cty.NullVal(ty),
+						After: cty.ObjectVal(map[string]cty.Value{
+							"id":  cty.StringVal("1234"),
+							"foo": cty.StringVal("bar"),
+						}),
+					},
+				}
+				rcs, err := rc.Encode(ty)
+				if err != nil {
+					panic(err)
+				}
+				drs := []*plans.ResourceInstanceChangeSrc{rcs}
+				changes := plans.NewChanges()
+				changes.Resources = drs
+				return &plans.Plan{
+					UIMode:           plans.NormalMode,
+					Changes:          changes,
+					DriftedResources: drs,
+					RelevantAttributes: []globalref.ResourceAttr{{
+						Resource: addr.ContainingResource(),
+						Attr:     cty.GetAttrPath("id"),
+					}},
+				}
+			},
+			"No changes",
 		},
 		"drift detected in refresh-only mode": {
 			func(schemas *terraform.Schemas) *plans.Plan {
@@ -272,6 +321,7 @@ func TestOperation_planNoChanges(t *testing.T) {
 			plan := test.plan(schemas)
 			v.Plan(plan, schemas)
 			got := done(t).Stdout()
+			fmt.Println("GOT\n", got)
 			if want := test.wantText; want != "" && !strings.Contains(got, want) {
 				t.Errorf("missing expected message\ngot:\n%s\n\nwant substring: %s", got, want)
 			}

@@ -452,8 +452,6 @@ func renderChangesDetectedByRefresh(plan *plans.Plan, schemas *terraform.Schemas
 // may have contributed to the plan as a whole. If the resulting change will be
 // a NoOp if it has nothing relevant to the plan.
 func filterRefreshChange(change *plans.ResourceInstanceChange, contributing []globalref.ResourceAttr) plans.Change {
-
-	fmt.Println("filtering", change.Addr)
 	if change.Action == plans.NoOp {
 		return change.Change
 	}
@@ -462,16 +460,14 @@ func filterRefreshChange(change *plans.ResourceInstanceChange, contributing []gl
 	resAddr := change.Addr.ContainingResource()
 
 	for _, attr := range contributing {
-		fmt.Printf("  contrib: %s %#v\n", attr.Resource, attr.Attr)
 		if resAddr.Equal(attr.Resource) {
-			fmt.Printf("      rel: %s %#v\n", attr.Resource, attr.Attr)
 			relevantAttrs = append(relevantAttrs, attr.Attr)
 		}
 	}
 
+	fmt.Println("FILTER:", change.Addr)
 	// if no attributes are relevant, then we can just use the Before value
 	if len(relevantAttrs) == 0 {
-		fmt.Println("NO RELEVANT", resAddr)
 		return plans.Change{
 			Action: plans.NoOp,
 			Before: change.Before,
@@ -479,6 +475,7 @@ func filterRefreshChange(change *plans.ResourceInstanceChange, contributing []gl
 		}
 	}
 
+	fmt.Printf("RELEVANT: %#v\n", relevantAttrs)
 	// We have some attributes in this change which may have contributed to
 	// other changes in the plan, so we are going to take the Before value and
 	// add in only those attributes which may have contributed from the After
@@ -486,10 +483,14 @@ func filterRefreshChange(change *plans.ResourceInstanceChange, contributing []gl
 	before := change.Before
 	after, _ := cty.Transform(before, func(path cty.Path, v cty.Value) (cty.Value, error) {
 		for i, attrPath := range relevantAttrs {
+			// check SUBPATH for change first
+			fmt.Printf("CHECKING %#v.Equals(%#v)\n", attrPath, path)
 			if attrPath.Equals(path) {
 				// remove the path from further consideration
 				relevantAttrs = append(relevantAttrs[:i], relevantAttrs[i+1:]...)
-				return path.Apply(change.After)
+				v, err := path.Apply(change.After)
+				fmt.Printf("GETTING %v %#v\n", err, v)
+				return v, err
 			}
 		}
 		return v, nil
@@ -499,6 +500,8 @@ func filterRefreshChange(change *plans.ResourceInstanceChange, contributing []gl
 	if before.RawEquals(after) {
 		action = plans.NoOp
 	}
+	fmt.Printf("BEFORE:%#v\n", before)
+	fmt.Printf("AFTER :%#v\n", after)
 
 	return plans.Change{
 		Action: action,
