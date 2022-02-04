@@ -174,6 +174,33 @@ EOT_`,
 			cty.StringVal("sensitive value").Mark(marks.Sensitive),
 			"(sensitive)",
 		},
+		{
+			cty.StringVal("map(string)").Mark(marks.Raw),
+			"map(string)",
+		},
+		{
+			// Strings marked with marks.Raw are returned from the console-only
+			// type() function and should be printed without quoting
+			cty.StringVal("map(string)").Mark(marks.Raw),
+			"map(string)",
+		},
+		{
+			// Other values marked with marks.Raw should drop the mark and be
+			// formatted as usual
+			cty.MapVal(map[string]cty.Value{
+				"boop": cty.StringVal("honk"),
+			}).Mark(marks.Raw),
+			`tomap({
+  "boop" = "honk"
+})`,
+		},
+		{
+			// Values marked with multiple marks should drop only the Raw mark
+			cty.MapVal(map[string]cty.Value{
+				"boop": cty.StringVal("honk"),
+			}).WithMarks(cty.NewValueMarks(marks.Raw, marks.Sensitive)),
+			"(sensitive)",
+		},
 	}
 
 	for _, test := range tests {

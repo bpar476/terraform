@@ -17,9 +17,20 @@ func FormatValue(v cty.Value, indent int) string {
 	if !v.IsKnown() {
 		return "(known after apply)"
 	}
-	if v.Type().Equals(cty.String) && v.HasMark(marks.Raw) {
-		raw, _ := v.Unmark()
-		return raw.AsString()
+	// The raw mark is used only by the console-only `type` function, in order
+	// to allow display of a string value representation of the type without the
+	// usual HCL formatting. Due to mark propagation in cty, calling `type` as
+	// part of a larger expression can lead to other values being marked. Here
+	// we need to remove that mark to ensure that collections can be iterated.
+	if v.HasMark(marks.Raw) {
+		if v.Type().Equals(cty.String) {
+			raw, _ := v.Unmark()
+			return raw.AsString()
+		} else {
+			unmarked, valueMarks := v.Unmark()
+			delete(valueMarks, marks.Raw)
+			v = unmarked.WithMarks(valueMarks)
+		}
 	}
 	if v.HasMark(marks.Sensitive) {
 		return "(sensitive)"
